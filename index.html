@@ -1,0 +1,323 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+#gameWrap { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 1rem 0; }
+#hud { display: flex; gap: 20px; font-size: 14px; color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+#hud span { font-weight: 500; color: var(--color-text-primary); }
+canvas { border-radius: 8px; border: 0.5px solid var(--color-border-secondary); display: block; cursor: pointer; }
+#msg { font-size: 14px; color: var(--color-text-secondary); min-height: 20px; text-align: center; }
+#startBtn { font-size: 14px; padding: 8px 28px; cursor: pointer; border-radius: 8px; border: 0.5px solid var(--color-border-secondary); background: var(--color-background-primary); color: var(--color-text-primary); }
+#startBtn:hover { background: var(--color-background-secondary); }
+#controls { font-size: 12px; color: var(--color-text-tertiary); text-align: center; }
+</style>
+
+<div id="gameWrap">
+  <h2 class="sr-only">Four-lane car dodge game with trees and varied traffic</h2>
+  <div id="hud">Score: <span id="scoreEl">0</span> &nbsp; Best: <span id="bestEl">0</span> &nbsp; Speed: <span id="speedEl">1x</span></div>
+  <canvas id="c" width="420" height="520"></canvas>
+  <div id="msg">Press Start to play</div>
+  <button id="startBtn">Start</button>
+  <div id="controls">← → Arrow keys or A / D to switch lanes &nbsp;|&nbsp; tap lane on canvas</div>
+</div>
+
+<script>
+(function(){
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var W = 420, H = 520;
+
+  var ROAD_LEFT = 60, ROAD_RIGHT = 360;
+  var ROAD_W = ROAD_RIGHT - ROAD_LEFT;
+  var LANES = 4;
+  var LANE_W = ROAD_W / LANES;
+  var LANE_X = [];
+  for(var i=0;i<LANES;i++) LANE_X.push(ROAD_LEFT + LANE_W*i + LANE_W/2);
+
+  var CAR_W = 32, CAR_H = 56;
+  var state = 'idle';
+  var score=0, best=0, frame=0;
+  var playerLane=1, playerX, playerY=H-90, targetX;
+  var obstacles=[], trees=[];
+  var speed=3, spawnTimer=0, spawnInterval=70, raf=null;
+
+  var PLAYER_COLORS = ['#378ADD'];
+  var OBS_TYPES = [
+    {color:'#D85A30', roof:'#993C1D', type:'sedan'},
+    {color:'#1D9E75', roof:'#0F6E56', type:'sedan'},
+    {color:'#7F77DD', roof:'#534AB7', type:'sedan'},
+    {color:'#D4537E', roof:'#993556', type:'sedan'},
+    {color:'#BA7517', roof:'#854F0B', type:'sedan'},
+    {color:'#E24B4A', roof:'#A32D2D', type:'suv'},
+    {color:'#444441', roof:'#2C2C2A', type:'suv'},
+    {color:'#888780', roof:'#5F5E5A', type:'truck'},
+    {color:'#639922', roof:'#3B6D11', type:'truck'},
+    {color:'#F0997B', roof:'#D85A30', type:'sports'},
+    {color:'#AFA9EC', roof:'#7F77DD', type:'sports'},
+    {color:'#5DCAA5', roof:'#1D9E75', type:'van'},
+    {color:'#FAC775', roof:'#EF9F27', type:'van'},
+  ];
+
+  function initTrees(){
+    trees = [];
+    var treeX = [8, 28, ROAD_RIGHT+8, ROAD_RIGHT+28];
+    for(var tx=0;tx<treeX.length;tx++){
+      for(var y=0;y<H+120;y+=80){
+        trees.push({x:treeX[tx], y: y + Math.random()*40, phase: Math.random()*Math.PI*2, side: tx < 2 ? 'left':'right'});
+      }
+    }
+  }
+
+  function drawTree(x, y){
+    ctx.fillStyle = '#5F5E5A';
+    ctx.fillRect(x-3, y-2, 6, 18);
+    ctx.fillStyle = '#3B6D11';
+    ctx.beginPath();
+    ctx.arc(x, y-10, 13, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#27500A';
+    ctx.beginPath();
+    ctx.arc(x-4, y-14, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#639922';
+    ctx.beginPath();
+    ctx.arc(x+3, y-16, 7, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawSidewalk(){
+    ctx.fillStyle = '#4a4a3a';
+    ctx.fillRect(0,0,ROAD_LEFT,H);
+    ctx.fillRect(ROAD_RIGHT,0,W-ROAD_RIGHT,H);
+    ctx.fillStyle = '#5a5a4a';
+    for(var y=0;y<H;y+=24){
+      ctx.fillRect(2,y,ROAD_LEFT-4,11);
+      ctx.fillRect(ROAD_RIGHT+2,y,W-ROAD_RIGHT-4,11);
+    }
+  }
+
+  function drawRoad(){
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillRect(ROAD_LEFT,0,ROAD_W,H);
+    ctx.fillStyle = '#555';
+    ctx.fillRect(ROAD_LEFT,0,3,H);
+    ctx.fillRect(ROAD_RIGHT-3,0,3,H);
+    var midX = ROAD_LEFT + ROAD_W/2;
+    ctx.fillStyle = '#ffd700';
+    ctx.fillRect(midX-2,0,4,H);
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([28,24]);
+    for(var l=1;l<LANES;l++){
+      if(l === LANES/2) continue;
+      ctx.beginPath();
+      ctx.moveTo(ROAD_LEFT+LANE_W*l, 0);
+      ctx.lineTo(ROAD_LEFT+LANE_W*l, H);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  function drawCarShape(x, y, color, roofColor, type, isPlayer){
+    var lx = x - CAR_W/2, ty = y - CAR_H/2;
+    var cw = CAR_W, ch = CAR_H;
+    if(type==='suv'){ cw=34; ch=58; lx=x-cw/2; ty=y-ch/2; }
+    if(type==='truck'){ cw=34; ch=66; lx=x-cw/2; ty=y-ch/2; }
+    if(type==='sports'){ cw=30; ch=52; lx=x-cw/2; ty=y-ch/2; }
+    if(type==='van'){ cw=36; ch=64; lx=x-cw/2; ty=y-ch/2; }
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(lx+3, ty+8, cw-6, ch-12, 5);
+    ctx.fill();
+
+    if(type==='sedan'){
+      ctx.fillStyle = roofColor;
+      ctx.beginPath();
+      ctx.roundRect(lx+6, ty+14, cw-12, 20, 4);
+      ctx.fill();
+      ctx.fillStyle = isPlayer ? '#adf' : '#335';
+      ctx.beginPath();
+      ctx.roundRect(lx+7, ty+16, cw-14, 16, 3);
+      ctx.fill();
+    } else if(type==='suv'){
+      ctx.fillStyle = roofColor;
+      ctx.beginPath();
+      ctx.roundRect(lx+5, ty+10, cw-10, 26, 4);
+      ctx.fill();
+      ctx.fillStyle = isPlayer ? '#adf' : '#335';
+      ctx.beginPath();
+      ctx.roundRect(lx+7, ty+12, cw-14, 22, 3);
+      ctx.fill();
+    } else if(type==='truck'){
+      ctx.fillStyle = roofColor;
+      ctx.beginPath();
+      ctx.roundRect(lx+4, isPlayer?ty+8:ty+28, cw-8, 18, 4);
+      ctx.fill();
+      ctx.fillStyle = isPlayer ? '#adf' : '#335';
+      ctx.fillRect(lx+6, isPlayer?ty+10:ty+30, cw-12, 14);
+      ctx.fillStyle = '#2a2a2a';
+      ctx.fillRect(lx+4, isPlayer?ty+28:ty+8, cw-8, 18);
+    } else if(type==='sports'){
+      ctx.fillStyle = roofColor;
+      ctx.beginPath();
+      ctx.roundRect(lx+7, ty+16, cw-14, 14, 3);
+      ctx.fill();
+      ctx.fillStyle = isPlayer ? '#adf' : '#335';
+      ctx.fillRect(lx+8, ty+17, cw-16, 12);
+    } else if(type==='van'){
+      ctx.fillStyle = roofColor;
+      ctx.beginPath();
+      ctx.roundRect(lx+4, ty+8, cw-8, 30, 3);
+      ctx.fill();
+      ctx.fillStyle = isPlayer ? '#adf' : '#335';
+      ctx.fillRect(lx+6, ty+10, cw-12, 10);
+      ctx.fillRect(lx+6, ty+22, cw-12, 12);
+    }
+
+    ctx.fillStyle = isPlayer ? '#FFE566' : '#cc3';
+    ctx.fillRect(lx+3, isPlayer?ty+ch-12:ty+4, 10, 5);
+    ctx.fillRect(lx+cw-13, isPlayer?ty+ch-12:ty+4, 10, 5);
+    ctx.fillStyle = isPlayer ? '#f55' : '#F90';
+    ctx.fillRect(lx+3, isPlayer?ty+4:ty+ch-12, 8, 4);
+    ctx.fillRect(lx+cw-11, isPlayer?ty+4:ty+ch-12, 8, 4);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(lx, ty+12, 4, 9);
+    ctx.fillRect(lx+cw-4, ty+12, 4, 9);
+    ctx.fillRect(lx, ty+ch-22, 4, 9);
+    ctx.fillRect(lx+cw-4, ty+ch-22, 4, 9);
+  }
+
+  function spawnObs(){
+    var lane = Math.floor(Math.random()*LANES);
+    var t = OBS_TYPES[Math.floor(Math.random()*OBS_TYPES.length)];
+    obstacles.push({x:LANE_X[lane], y:-70, color:t.color, roof:t.roof, type:t.type, lane:lane});
+  }
+
+  function checkCollision(){
+    for(var i=0;i<obstacles.length;i++){
+      var o=obstacles[i];
+      if(Math.abs(o.x-playerX)<CAR_W-5 && Math.abs(o.y-playerY)<CAR_H-8) return true;
+    }
+    return false;
+  }
+
+  function update(){
+    frame++;
+    score = Math.floor(frame/6);
+    speed = Math.min(13, 3 + Math.floor(score/25)*0.6);
+    playerX += (targetX-playerX)*0.15;
+    for(var i=0;i<obstacles.length;i++) obstacles[i].y += speed;
+    obstacles = obstacles.filter(function(o){return o.y<H+80;});
+    for(var t=0;t<trees.length;t++){
+      trees[t].y += speed*0.4;
+      if(trees[t].y > H+60) trees[t].y -= H+120;
+    }
+    spawnTimer++;
+    spawnInterval = Math.max(28, 70 - Math.floor(score/15)*4);
+    if(spawnTimer>=spawnInterval){spawnObs();spawnTimer=0;}
+    if(checkCollision()) endGame();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#1a1a1a';
+    ctx.fillRect(0,0,W,H);
+    drawSidewalk();
+    for(var t=0;t<trees.length;t++) drawTree(trees[t].x, trees[t].y);
+    drawRoad();
+    for(var i=0;i<obstacles.length;i++){
+      var o=obstacles[i];
+      drawCarShape(o.x,o.y,o.color,o.roof,o.type,false);
+    }
+    drawCarShape(playerX, playerY, '#378ADD', '#185FA5', 'sedan', true);
+    document.getElementById('scoreEl').textContent = score;
+    document.getElementById('speedEl').textContent = speed.toFixed(1)+'x';
+  }
+
+  function drawIdle(){
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#1a1a1a';
+    ctx.fillRect(0,0,W,H);
+    drawSidewalk();
+    initTrees();
+    for(var t=0;t<trees.length;t++) drawTree(trees[t].x, trees[t].y);
+    drawRoad();
+    drawCarShape(LANE_X[1], H-90, '#378ADD','#185FA5','sedan',true);
+    ctx.fillStyle='rgba(0,0,0,0.6)';
+    ctx.fillRect(ROAD_LEFT,H/2-40,ROAD_W,80);
+    ctx.fillStyle='#fff';
+    ctx.font='500 18px sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText('4-Lane Traffic Dodge',W/2,H/2-12);
+    ctx.font='13px sans-serif';
+    ctx.fillStyle='#bbb';
+    ctx.fillText('Press Start to begin',W/2,H/2+16);
+  }
+
+  function loop(){
+    if(state!=='playing') return;
+    update();
+    draw();
+    raf = requestAnimationFrame(loop);
+  }
+
+  function startGame(){
+    if(raf) cancelAnimationFrame(raf);
+    score=0;frame=0;speed=3;
+    obstacles=[];spawnTimer=0;spawnInterval=70;
+    playerLane=1;
+    playerX=LANE_X[1];targetX=LANE_X[1];
+    playerY=H-90;
+    initTrees();
+    state='playing';
+    document.getElementById('msg').textContent='';
+    document.getElementById('startBtn').textContent='Restart';
+    loop();
+  }
+
+  function endGame(){
+    state='dead';
+    if(raf) cancelAnimationFrame(raf);
+    if(score>best){best=score;document.getElementById('bestEl').textContent=best;}
+    draw();
+    ctx.fillStyle='rgba(0,0,0,0.7)';
+    ctx.fillRect(ROAD_LEFT,H/2-56,ROAD_W,104);
+    ctx.fillStyle='#fff';
+    ctx.font='500 22px sans-serif';
+    ctx.textAlign='center';
+    ctx.fillText('Crashed!',W/2,H/2-22);
+    ctx.font='14px sans-serif';
+    ctx.fillStyle='#ccc';
+    ctx.fillText('Score: '+score+'   Best: '+best,W/2,H/2+6);
+    ctx.fillStyle='#999';
+    ctx.font='13px sans-serif';
+    ctx.fillText('Press Restart to play again',W/2,H/2+30);
+    document.getElementById('msg').textContent='Press Restart to play again';
+  }
+
+  function goLeft(){ if(playerLane>0){playerLane--;targetX=LANE_X[playerLane];} }
+  function goRight(){ if(playerLane<LANES-1){playerLane++;targetX=LANE_X[playerLane];} }
+
+  document.getElementById('startBtn').addEventListener('click', startGame);
+
+  document.addEventListener('keydown',function(e){
+    if(state!=='playing') return;
+    if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A'){e.preventDefault();goLeft();}
+    if(e.key==='ArrowRight'||e.key==='d'||e.key==='D'){e.preventDefault();goRight();}
+  });
+
+  canvas.addEventListener('click',function(e){
+    if(state!=='playing') return;
+    var rect=canvas.getBoundingClientRect();
+    var cx=e.clientX-rect.left;
+    var scaleX = W/rect.width;
+    var rx = cx*scaleX;
+    var lane = Math.floor((rx-ROAD_LEFT)/LANE_W);
+    lane = Math.max(0,Math.min(LANES-1,lane));
+    playerLane=lane;
+    targetX=LANE_X[lane];
+  });
+
+  drawIdle();
+})();
+</script>
